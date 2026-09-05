@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useMemo } from "react";
+import dynamic from "next/dynamic";
 import {
   ResponsiveContainer,
   LineChart,
@@ -10,6 +11,18 @@ import {
   Tooltip,
   CartesianGrid,
 } from "recharts";
+
+// Leaflet necesita `window`, así que el mapa se carga solo en el cliente.
+const MapPicker = dynamic(() => import("./components/MapPicker"), {
+  ssr: false,
+  loading: () => (
+    <div className="h-full w-full flex items-center justify-center text-sm text-inkSoft">
+      Cargando mapa…
+    </div>
+  ),
+});
+
+const FAVORITES_KEY = "rumbo:favoritos";
 
 const CURRENCY_INFO = {
   USD: { label: "Dólar estadounidense", flag: "🇺🇸" },
@@ -57,10 +70,44 @@ const COUNTRY_TO_CURRENCY = {
 const FRANKFURTER_UNSUPPORTED = new Set(["CRC"]);
 
 const NAV_ITEMS = [
-  { id: "resumen", label: "Resumen" },
-  { id: "guardados", label: "Guardados" },
-  { id: "convertir", label: "Convertir" },
+  { id: "resumen", label: "Resumen", icon: "home" },
+  { id: "mapa", label: "Mapa", icon: "map" },
+  { id: "convertir", label: "Convertir", icon: "swap" },
+  { id: "guardados", label: "Guardados", icon: "star" },
 ];
+
+function NavIcon({ name, size = 20 }) {
+  const common = { width: size, height: size, viewBox: "0 0 24 24", fill: "none" };
+  switch (name) {
+    case "home":
+      return (
+        <svg {...common}>
+          <path d="M4 11.5 12 5l8 6.5M6 10v9h5v-5h2v5h5v-9" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      );
+    case "map":
+      return (
+        <svg {...common}>
+          <path d="M9 4 4 6v14l5-2 6 2 5-2V4l-5 2-6-2Z" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+          <path d="M9 4v14M15 6v14" stroke="currentColor" strokeWidth="1.8" />
+        </svg>
+      );
+    case "swap":
+      return (
+        <svg {...common}>
+          <path d="M7 7h11m0 0-3.5-3.5M18 7l-3.5 3.5M17 17H6m0 0 3.5 3.5M6 17l3.5-3.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      );
+    case "star":
+      return (
+        <svg {...common}>
+          <path d="m12 4 2.4 5.2 5.6.6-4.2 3.9 1.2 5.6L12 16.6 6.9 19.3l1.2-5.6-4.2-3.9 5.6-.6L12 4Z" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+        </svg>
+      );
+    default:
+      return null;
+  }
+}
 
 function weatherInfo(code, isDay = true) {
   if (code === 0) return { label: isDay ? "Cielo despejado" : "Noche despejada", icon: "sun" };
@@ -205,6 +252,34 @@ export default function Home() {
   const [loadingRate, setLoadingRate] = useState(false);
   const [rateError, setRateError] = useState("");
 
+  const [showRadar, setShowRadar] = useState(false);
+  const [mapError, setMapError] = useState("");
+
+  // Carga los destinos guardados una sola vez al abrir la app.
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem(FAVORITES_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        // Corrige favoritos guardados con una versión anterior que podía
+        // dejar "auto" como zona horaria (no es válida para el navegador).
+        const sanitized = parsed.map((f) => (f.timezone === "auto" ? { ...f, timezone: null } : f));
+        setFavorites(sanitized);
+      }
+    } catch (e) {
+      // localStorage no disponible (modo privado, etc.); seguimos sin guardado
+    }
+  }, []);
+
+  // Guarda cada cambio para que "Guardados" sobreviva a un refresh.
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(FAVORITES_KEY, JSON.stringify(favorites));
+    } catch (e) {
+      // si falla, la app sigue funcionando, solo no persiste
+    }
+  }, [favorites]);
+
   // Busca coincidencias de ciudad y las muestra para que el usuario elija
   // la correcta (ej. "Atenas, Alajuela, Costa Rica" vs "Atenas, Grecia").
   const searchPlaces = useCallback(async (text) => {
@@ -236,6 +311,13 @@ export default function Home() {
     setSearchError("");
     setWeatherError("");
     setLoadingWeather(true);
+    // "auto" le pide a Open-Meteo que resuelva la zona horaria real (hace
+    // falta para los lugares que vienen del mapa, Nominatim no la incluye).
+    // Ojo: "auto" es solo un valor para ESE pedido, nunca es una zona
+    // horaria válida para el navegador (Intl), así que en `dest.timezone`
+    // guardamos null hasta tener la zona real.
+    const hasValidTz = g.timezone && g.timezone !== "auto";
+    const requestedTz = hasValidTz ? g.timezone : "auto";
     const dest = {
       name: g.name,
       admin1: g.admin1 || "",
@@ -243,7 +325,7 @@ export default function Home() {
       countryCode: g.country_code,
       lat: g.latitude,
       lon: g.longitude,
-      timezone: g.timezone,
+      timezone: hasValidTz ? g.timezone : null,
     };
     setDestination(dest);
 
@@ -259,21 +341,58 @@ export default function Home() {
           `&current=temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,weather_code,is_day` +
           `&hourly=temperature_2m,weather_code` +
           `&daily=temperature_2m_max,temperature_2m_min,weather_code` +
-          `&forecast_days=7&timezone=${encodeURIComponent(g.timezone)}`
+          `&forecast_days=7&timezone=${encodeURIComponent(requestedTz)}`
       );
       const wData = await wRes.json();
+      const resolvedTz = wData.timezone || dest.timezone || null;
+      const resolvedDest = { ...dest, timezone: resolvedTz };
+      if (resolvedTz !== dest.timezone) setDestination(resolvedDest);
       setWeather(wData);
       setUpdatedAt(new Date());
 
       setFavorites((prev) => {
-        const withoutDup = prev.filter((f) => !(f.name === dest.name && f.country === dest.country));
-        return [{ ...dest, temp: Math.round(wData?.current?.temperature_2m ?? 0) }, ...withoutDup].slice(0, 6);
+        const withoutDup = prev.filter((f) => !(f.name === resolvedDest.name && f.country === resolvedDest.country));
+        return [{ ...resolvedDest, temp: Math.round(wData?.current?.temperature_2m ?? 0) }, ...withoutDup].slice(0, 6);
       });
     } catch (e) {
       setWeatherError("No se pudo conectar con el servicio de clima. Revisá tu conexión e intentá otra vez.");
     } finally {
       setLoadingWeather(false);
     }
+  }, []);
+
+  // Convierte un punto del mapa (lat/lon) en un lugar buscable, usando
+  // geocodificación inversa gratuita de OpenStreetMap (Nominatim).
+  const handleMapPick = useCallback(async (lat, lon) => {
+    setMapError("");
+    try {
+      const res = await fetch(
+        `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}&accept-language=es&zoom=10`
+      );
+      const data = await res.json();
+      const addr = data.address || {};
+      const name =
+        addr.city || addr.town || addr.village || addr.municipality || addr.county || data.name;
+      if (!name) {
+        setMapError("Ese punto parece estar en medio del mar u otra zona sin datos. Probá otro lugar del mapa.");
+        return;
+      }
+      selectPlace({
+        name,
+        admin1: addr.state || addr.region || "",
+        country: addr.country || "",
+        country_code: (addr.country_code || "").toUpperCase(),
+        latitude: lat,
+        longitude: lon,
+        timezone: "auto",
+      });
+    } catch (e) {
+      setMapError("No se pudo identificar ese punto del mapa. Revisá tu conexión e intentá de nuevo.");
+    }
+  }, [selectPlace]);
+
+  const removeFavorite = useCallback((fav) => {
+    setFavorites((prev) => prev.filter((f) => !(f.name === fav.name && f.country === fav.country)));
   }, []);
 
   useEffect(() => {
@@ -344,57 +463,66 @@ export default function Home() {
   const info = current ? weatherInfo(current.weather_code, current.is_day) : null;
   const converted = rateData?.rates?.[toCur];
 
+  const goToFavorite = (f) =>
+    selectPlace({
+      name: f.name, admin1: f.admin1, country: f.country, country_code: f.countryCode,
+      latitude: f.lat, longitude: f.lon, timezone: f.timezone,
+    });
+
   return (
     <div className="min-h-screen flex flex-col md:flex-row">
-      {/* Sidebar */}
-      <aside className="md:w-60 shrink-0 border-b md:border-b-0 md:border-r border-line bg-surface px-5 py-6 flex md:flex-col gap-6 md:gap-8">
+      {/* Sidebar (desktop) */}
+      <aside className="hidden md:flex md:w-60 shrink-0 md:border-r border-line bg-surface px-5 py-6 md:flex-col gap-8">
         <div>
           <h1 className="font-display text-2xl tracking-tight">Rumbo</h1>
-          <p className="text-inkSoft text-xs mt-1 hidden md:block">Clima y moneda para tu próximo viaje</p>
+          <p className="text-inkSoft text-xs mt-1">Clima y moneda para tu próximo viaje</p>
         </div>
 
-        <nav className="flex md:flex-col gap-1 md:gap-1">
+        <nav className="flex flex-col gap-1">
           {NAV_ITEMS.map((item) => (
             <a
               key={item.id}
               href={`#${item.id}`}
               onClick={() => setActiveNav(item.id)}
-              className={`px-3 py-2 rounded-lg text-sm transition-colors ${
+              className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors ${
                 activeNav === item.id
                   ? "bg-surface2 text-ink"
                   : "text-inkSoft hover:text-ink hover:bg-surface2/60"
               }`}
             >
+              <NavIcon name={item.icon} size={17} />
               {item.label}
             </a>
           ))}
         </nav>
-
-        <div id="guardados" className="hidden md:block flex-1 overflow-y-auto">
-          <p className="text-xs text-inkSoft mb-2">Destinos guardados</p>
-          <div className="flex flex-col gap-1">
-            {favorites.map((f) => (
-              <button
-                key={f.name + f.country}
-                onClick={() => selectPlace({
-                  name: f.name, admin1: f.admin1, country: f.country, country_code: f.countryCode,
-                  latitude: f.lat, longitude: f.lon, timezone: f.timezone,
-                })}
-                className="flex items-center justify-between px-3 py-2 rounded-lg hover:bg-surface2/60 text-left"
-              >
-                <span className="text-sm text-ink truncate">{f.name}</span>
-                <span className="text-sm text-inkSoft">{f.temp}°</span>
-              </button>
-            ))}
-            {favorites.length === 0 && (
-              <p className="text-xs text-inkSoft/70">Tus búsquedas van a aparecer acá.</p>
-            )}
-          </div>
-        </div>
       </aside>
 
+      {/* Header (mobile) */}
+      <div className="md:hidden px-5 pt-6 pb-2">
+        <h1 className="font-display text-2xl tracking-tight">Rumbo</h1>
+      </div>
+
+      {/* Tab bar fija (mobile), estilo apps nativas de iOS */}
+      <nav className="md:hidden fixed bottom-0 inset-x-0 z-30 bg-surface/95 backdrop-blur border-t border-line pb-[env(safe-area-inset-bottom)]">
+        <div className="grid grid-cols-4">
+          {NAV_ITEMS.map((item) => (
+            <a
+              key={item.id}
+              href={`#${item.id}`}
+              onClick={() => setActiveNav(item.id)}
+              className={`flex flex-col items-center gap-1 py-2.5 text-[11px] transition-colors ${
+                activeNav === item.id ? "text-amber" : "text-inkSoft"
+              }`}
+            >
+              <NavIcon name={item.icon} size={20} />
+              {item.label}
+            </a>
+          ))}
+        </div>
+      </nav>
+
       {/* Main */}
-      <main className="flex-1 px-5 py-6 md:px-8 md:py-8 max-w-5xl mx-auto w-full" id="resumen">
+      <main className="flex-1 px-5 py-6 pb-24 md:pb-8 md:px-8 md:py-8 max-w-5xl mx-auto w-full" id="resumen">
         {/* Top bar */}
         <div className="flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-4 mb-2 relative">
           <form onSubmit={handleSubmit} className="flex-1 flex gap-2">
@@ -505,15 +633,53 @@ export default function Home() {
                   <div>
                     <p className="text-xs text-inkSoft">Hora local</p>
                     <p className="text-lg text-ink mt-0.5">
-                      {new Date().toLocaleTimeString("es-ES", {
-                        hour: "2-digit",
-                        minute: "2-digit",
-                        timeZone: destination.timezone,
-                      })}
+                      {destination.timezone && destination.timezone !== "auto"
+                        ? new Date().toLocaleTimeString("es-ES", {
+                            hour: "2-digit",
+                            minute: "2-digit",
+                            timeZone: destination.timezone,
+                          })
+                        : "—"}
                     </p>
                   </div>
                 </div>
               </div>
+            </div>
+
+            {/* Map */}
+            <div id="mapa" className="bg-surface border border-line rounded-xl2 p-5 mb-4">
+              <div className="flex items-center justify-between mb-3 gap-3">
+                <div>
+                  <p className="text-xs text-inkSoft">Buscar en el mapa</p>
+                  <p className="text-[11px] text-inkSoft/70 mt-0.5">Tocá cualquier punto para ver su clima</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowRadar((v) => !v)}
+                  className={`shrink-0 text-xs px-3 py-1.5 rounded-full border transition ${
+                    showRadar
+                      ? "bg-sky/20 border-sky text-sky"
+                      : "border-line text-inkSoft hover:text-ink"
+                  }`}
+                >
+                  {showRadar ? "Precipitación: ON" : "Precipitación: OFF"}
+                </button>
+              </div>
+
+              {mapError && <p className="text-xs text-red-300 mb-2">{mapError}</p>}
+
+              <div className="h-72 md:h-96 rounded-lg overflow-hidden">
+                <MapPicker
+                  destination={destination}
+                  favorites={favorites}
+                  showRadar={showRadar}
+                  onPick={handleMapPick}
+                  onSelectFavorite={goToFavorite}
+                />
+              </div>
+              <p className="text-[11px] text-inkSoft/70 mt-2">
+                Mapa: OpenStreetMap · Radar: RainViewer
+              </p>
             </div>
 
             {/* Hourly trend + currency */}
@@ -652,6 +818,41 @@ export default function Home() {
                 </div>
               </div>
             )}
+
+            {/* Guardados */}
+            <div id="guardados" className="bg-surface border border-line rounded-xl2 p-5 mt-4">
+              <p className="text-xs text-inkSoft mb-3">Destinos guardados</p>
+              {favorites.length === 0 ? (
+                <p className="text-xs text-inkSoft/70">
+                  Los lugares que busqués van a aparecer acá y se quedan guardados aunque cierres la app.
+                </p>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                  {favorites.map((f) => (
+                    <div
+                      key={f.name + f.country}
+                      className="flex items-center justify-between gap-2 bg-surface2 rounded-lg pl-3 pr-1.5 py-1.5"
+                    >
+                      <button
+                        onClick={() => goToFavorite(f)}
+                        className="flex-1 min-w-0 flex items-center justify-between gap-2 text-left"
+                      >
+                        <span className="text-sm text-ink truncate">{f.name}</span>
+                        <span className="text-sm text-inkSoft shrink-0">{f.temp}°</span>
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={`Quitar ${f.name}`}
+                        onClick={() => removeFavorite(f)}
+                        className="shrink-0 w-7 h-7 rounded-md text-inkSoft hover:text-red-300 hover:bg-surface/60 transition text-sm"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </>
         )}
       </main>
