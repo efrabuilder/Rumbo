@@ -310,6 +310,7 @@ export default function Home() {
     setSuggestions([]);
     setSearchError("");
     setWeatherError("");
+    setMapError("");
     setLoadingWeather(true);
     // "auto" le pide a Open-Meteo que resuelva la zona horaria real (hace
     // falta para los lugares que vienen del mapa, Nominatim no la incluye).
@@ -678,7 +679,7 @@ export default function Home() {
                 />
               </div>
               <p className="text-[11px] text-inkSoft/70 mt-2">
-                Mapa: OpenStreetMap · Radar: RainViewer
+                Mapa: MapTiler · Radar: RainViewer
               </p>
             </div>
 
