@@ -547,7 +547,7 @@ export default function Home() {
                     min="0"
                     value={amount}
                     onChange={(e) => setAmount(e.target.value)}
-                    className="flex-1 min-w-0 bg-surface2 border border-line rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber/60"
+                    className="no-spinner flex-1 min-w-0 bg-surface2 border border-line rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber/60"
                   />
                   <div className="flex flex-col gap-1 shrink-0">
                     <button
