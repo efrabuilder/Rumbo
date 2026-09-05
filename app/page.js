@@ -40,6 +40,7 @@ const CURRENCY_INFO = {
   PHP: { label: "Peso filipino", flag: "🇵🇭" },
   MYR: { label: "Ringgit malasio", flag: "🇲🇾" },
   RON: { label: "Leu rumano", flag: "🇷🇴" },
+  CRC: { label: "Colón costarricense", flag: "🇨🇷" },
 };
 
 const COUNTRY_TO_CURRENCY = {
@@ -48,8 +49,12 @@ const COUNTRY_TO_CURRENCY = {
   MX: "MXN", CA: "CAD", AU: "AUD", NZ: "NZD", CH: "CHF", CN: "CNY", SE: "SEK",
   SG: "SGD", HK: "HKD", NO: "NOK", KR: "KRW", TR: "TRY", IN: "INR", BR: "BRL",
   ZA: "ZAR", DK: "DKK", PL: "PLN", TH: "THB", ID: "IDR", CZ: "CZK", IL: "ILS",
-  PH: "PHP", MY: "MYR", RO: "RON",
+  PH: "PHP", MY: "MYR", RO: "RON", CR: "CRC",
 };
+
+// Frankfurter (BCE) no cubre todas las monedas; para las que le faltan
+// (ej. CRC) se usa directo la API de respaldo.
+const FRANKFURTER_UNSUPPORTED = new Set(["CRC"]);
 
 const NAV_ITEMS = [
   { id: "resumen", label: "Resumen" },
@@ -147,8 +152,43 @@ function SwapIcon() {
   );
 }
 
+// Obtiene la tasa de cambio. Intenta primero Frankfurter (BCE); si falla,
+// si no soporta la moneda, o si la conexión da error, usa open.er-api.com
+// como respaldo (también gratis, sin API key).
+async function fetchRate(amount, from, to) {
+  const amt = Number(amount) || 0;
+  if (from === to) return { rates: { [to]: amt }, date: null, source: "same" };
+
+  const canUseFrankfurter = !FRANKFURTER_UNSUPPORTED.has(from) && !FRANKFURTER_UNSUPPORTED.has(to);
+
+  if (canUseFrankfurter) {
+    try {
+      const res = await fetch(`https://api.frankfurter.app/latest?amount=${amt}&from=${from}&to=${to}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.rates?.[to] != null) {
+          return { rates: data.rates, date: data.date, source: "frankfurter" };
+        }
+      }
+    } catch (e) {
+      // seguimos al respaldo
+    }
+  }
+
+  const res2 = await fetch(`https://open.er-api.com/v6/latest/${from}`);
+  if (!res2.ok) throw new Error("No se pudo contactar ningún servicio de tasas de cambio.");
+  const data2 = await res2.json();
+  if (data2.result !== "success" || data2.rates?.[to] == null) {
+    throw new Error(`No hay tasa disponible para ${from} → ${to}.`);
+  }
+  const date = data2.time_last_update_utc ? data2.time_last_update_utc.slice(0, 16) : null;
+  return { rates: { [to]: data2.rates[to] * amt }, date, source: "open.er-api" };
+}
+
 export default function Home() {
   const [query, setQuery] = useState("");
+  const [suggestions, setSuggestions] = useState([]);
+  const [searchError, setSearchError] = useState("");
   const [destination, setDestination] = useState(null);
   const [favorites, setFavorites] = useState([]);
   const [activeNav, setActiveNav] = useState("resumen");
@@ -165,37 +205,55 @@ export default function Home() {
   const [loadingRate, setLoadingRate] = useState(false);
   const [rateError, setRateError] = useState("");
 
-  const searchCity = useCallback(async (text) => {
+  // Busca coincidencias de ciudad y las muestra para que el usuario elija
+  // la correcta (ej. "Atenas, Alajuela, Costa Rica" vs "Atenas, Grecia").
+  const searchPlaces = useCallback(async (text) => {
     if (!text.trim()) return;
-    setWeatherError("");
-    setLoadingWeather(true);
+    setSearchError("");
+    setSuggestions([]);
     try {
       const geoRes = await fetch(
-        `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(text)}&count=1&language=es&format=json`
+        `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(text)}&count=8&language=es&format=json`
       );
       const geoData = await geoRes.json();
       if (!geoData.results || geoData.results.length === 0) {
-        setWeatherError("No encontramos esa ciudad. Probá con otro nombre.");
-        setLoadingWeather(false);
+        setSearchError("No encontramos esa ciudad. Probá con otro nombre o agregá el país (ej. \"Atenas, Costa Rica\").");
         return;
       }
-      const g = geoData.results[0];
-      const dest = {
-        name: g.name,
-        country: g.country,
-        countryCode: g.country_code,
-        lat: g.latitude,
-        lon: g.longitude,
-        timezone: g.timezone,
-      };
-      setDestination(dest);
-
-      const currency = COUNTRY_TO_CURRENCY[g.country_code] || "USD";
-      if (CURRENCY_INFO[currency]) {
-        setToCur(currency);
-        setFromCur(currency === "USD" ? "EUR" : "USD");
+      if (geoData.results.length === 1) {
+        selectPlace(geoData.results[0]);
+      } else {
+        setSuggestions(geoData.results);
       }
+    } catch (e) {
+      setSearchError("No se pudo buscar la ciudad. Revisá tu conexión e intentá de nuevo.");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
+  const selectPlace = useCallback(async (g) => {
+    setSuggestions([]);
+    setSearchError("");
+    setWeatherError("");
+    setLoadingWeather(true);
+    const dest = {
+      name: g.name,
+      admin1: g.admin1 || "",
+      country: g.country,
+      countryCode: g.country_code,
+      lat: g.latitude,
+      lon: g.longitude,
+      timezone: g.timezone,
+    };
+    setDestination(dest);
+
+    const currency = COUNTRY_TO_CURRENCY[g.country_code] || "USD";
+    if (CURRENCY_INFO[currency]) {
+      setToCur(currency);
+      setFromCur(currency === "USD" ? "EUR" : "USD");
+    }
+
+    try {
       const wRes = await fetch(
         `https://api.open-meteo.com/v1/forecast?latitude=${g.latitude}&longitude=${g.longitude}` +
           `&current=temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,weather_code,is_day` +
@@ -219,7 +277,14 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    searchCity("Lisbon");
+    // primera carga: selecciona directo Lisboa, Portugal (sin mostrar sugerencias)
+    (async () => {
+      const geoRes = await fetch(
+        `https://geocoding-api.open-meteo.com/v1/search?name=Lisbon&count=1&language=es&format=json`
+      );
+      const geoData = await geoRes.json();
+      if (geoData.results?.[0]) selectPlace(geoData.results[0]);
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -229,22 +294,18 @@ export default function Home() {
       setLoadingRate(true);
       setRateError("");
       try {
-        const res = await fetch(
-          `https://api.frankfurter.app/latest?amount=${amount || 0}&from=${fromCur}&to=${toCur}`
-        );
-        const data = await res.json();
+        const data = await fetchRate(amount, fromCur, toCur);
         if (!cancelled) setRateData(data);
       } catch (e) {
-        if (!cancelled) setRateError("No se pudo obtener la tasa de cambio.");
+        if (!cancelled) {
+          setRateError(e.message || "No se pudo obtener la tasa de cambio.");
+          setRateData(null);
+        }
       } finally {
         if (!cancelled) setLoadingRate(false);
       }
     }
-    if (fromCur !== toCur) {
-      getRate();
-    } else {
-      setRateData({ rates: { [toCur]: Number(amount) || 0 }, date: null });
-    }
+    getRate();
     return () => {
       cancelled = true;
     };
@@ -252,13 +313,19 @@ export default function Home() {
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    searchCity(query);
-    setQuery("");
+    searchPlaces(query);
   };
 
   const swapCurrencies = () => {
     setFromCur(toCur);
     setToCur(fromCur);
+  };
+
+  const step = (delta) => {
+    setAmount((prev) => {
+      const next = (Number(prev) || 0) + delta;
+      return next < 0 ? 0 : next;
+    });
   };
 
   const hourlySeries = useMemo(() => {
@@ -309,7 +376,10 @@ export default function Home() {
             {favorites.map((f) => (
               <button
                 key={f.name + f.country}
-                onClick={() => searchCity(f.name)}
+                onClick={() => selectPlace({
+                  name: f.name, admin1: f.admin1, country: f.country, country_code: f.countryCode,
+                  latitude: f.lat, longitude: f.lon, timezone: f.timezone,
+                })}
                 className="flex items-center justify-between px-3 py-2 rounded-lg hover:bg-surface2/60 text-left"
               >
                 <span className="text-sm text-ink truncate">{f.name}</span>
@@ -326,13 +396,13 @@ export default function Home() {
       {/* Main */}
       <main className="flex-1 px-5 py-6 md:px-8 md:py-8 max-w-5xl mx-auto w-full" id="resumen">
         {/* Top bar */}
-        <div className="flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-4 mb-6">
+        <div className="flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-4 mb-2 relative">
           <form onSubmit={handleSubmit} className="flex-1 flex gap-2">
             <input
               type="text"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Buscar ciudad o aeropuerto"
+              placeholder="Buscar ciudad (ej. Atenas, Costa Rica)"
               className="flex-1 bg-surface border border-line rounded-xl px-4 py-2.5 text-sm placeholder:text-inkSoft focus:outline-none focus:ring-2 focus:ring-sky/60"
             />
             <button
@@ -348,7 +418,33 @@ export default function Home() {
               ? `Actualizado ${updatedAt.toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" })}`
               : "En vivo"}
           </span>
+
+          {suggestions.length > 0 && (
+            <div className="absolute top-full left-0 right-0 sm:right-auto sm:w-[420px] mt-2 bg-surface border border-line rounded-xl overflow-hidden z-10 shadow-xl">
+              <p className="text-xs text-inkSoft px-4 pt-3 pb-1">Elegí el lugar correcto</p>
+              {suggestions.map((s) => (
+                <button
+                  key={`${s.id}-${s.latitude}`}
+                  onClick={() => selectPlace(s)}
+                  className="w-full text-left px-4 py-2.5 hover:bg-surface2 text-sm flex items-center justify-between gap-3"
+                >
+                  <span className="text-ink">{s.name}</span>
+                  <span className="text-inkSoft text-xs truncate">
+                    {[s.admin1, s.country].filter(Boolean).join(", ")}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
+
+        {searchError && (
+          <div className="bg-surface border border-line rounded-xl px-4 py-3 text-sm text-red-300 mb-4 mt-2">
+            {searchError}
+          </div>
+        )}
+
+        <div className="mb-6" />
 
         {weatherError && (
           <div className="bg-surface border border-line rounded-xl px-4 py-3 text-sm text-red-300 mb-6">
@@ -370,7 +466,9 @@ export default function Home() {
               <div className="lg:col-span-2 bg-gradient-to-br from-surface2 to-surface border border-line rounded-xl2 p-6 flex flex-col justify-between">
                 <div className="flex items-start justify-between">
                   <div>
-                    <p className="text-inkSoft text-sm">{destination.country}</p>
+                    <p className="text-inkSoft text-sm">
+                      {[destination.admin1, destination.country].filter(Boolean).join(", ")}
+                    </p>
                     <h2 className="font-display text-2xl mt-0.5">{destination.name}</h2>
                   </div>
                   <WeatherIcon name={info.icon} size={48} />
@@ -439,18 +537,38 @@ export default function Home() {
                 </div>
               </div>
 
-              {/* Currency converter, integrated as a dashboard card */}
+              {/* Currency converter, integrado como tarjeta del dashboard */}
               <div id="convertir" className="bg-surface border border-line rounded-xl2 p-5">
-                <p className="text-xs text-inkSoft mb-3">
-                  Convertir a moneda de {destination.country}
-                </p>
-                <input
-                  type="number"
-                  min="0"
-                  value={amount}
-                  onChange={(e) => setAmount(e.target.value)}
-                  className="w-full bg-surface2 border border-line rounded-lg px-3 py-2 text-sm mb-2 focus:outline-none focus:ring-2 focus:ring-amber/60"
-                />
+                <p className="text-xs text-inkSoft mb-3">Conversor de moneda</p>
+
+                <div className="flex items-stretch gap-2 mb-2">
+                  <input
+                    type="number"
+                    min="0"
+                    value={amount}
+                    onChange={(e) => setAmount(e.target.value)}
+                    className="flex-1 min-w-0 bg-surface2 border border-line rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber/60"
+                  />
+                  <div className="flex flex-col gap-1 shrink-0">
+                    <button
+                      type="button"
+                      aria-label="Aumentar monto"
+                      onClick={() => step(1)}
+                      className="w-8 h-4 rounded-md border border-line bg-surface2 text-amber text-xs leading-none flex items-center justify-center hover:border-amber transition"
+                    >
+                      +
+                    </button>
+                    <button
+                      type="button"
+                      aria-label="Disminuir monto"
+                      onClick={() => step(-1)}
+                      className="w-8 h-4 rounded-md border border-line bg-surface2 text-amber text-xs leading-none flex items-center justify-center hover:border-amber transition"
+                    >
+                      −
+                    </button>
+                  </div>
+                </div>
+
                 <div className="flex items-center gap-2 mb-3">
                   <select
                     value={fromCur}
@@ -483,6 +601,11 @@ export default function Home() {
                     ))}
                   </select>
                 </div>
+
+                <p className="text-[11px] text-inkSoft mb-2">
+                  Sugerencia para {destination.name}: {CURRENCY_INFO[COUNTRY_TO_CURRENCY[destination.countryCode] || "USD"]?.flag}{" "}
+                  {COUNTRY_TO_CURRENCY[destination.countryCode] || "USD"}
+                </p>
 
                 {rateError && <p className="text-xs text-red-300 mb-2">{rateError}</p>}
 
