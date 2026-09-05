@@ -29,11 +29,3 @@ input[type="number"] {
   -moz-appearance: textfield;
   appearance: textfield;
 }
-
-/* Invierte las teselas normales de OpenStreetMap para que se vean oscuras,
-   acordes al tema de la app (evita depender de un proveedor de mapas que
-   exija API key para su versión oscura). */
-.map-tiles-dark {
-  filter: invert(1) hue-rotate(180deg) brightness(0.92) contrast(0.9);
-}
-
