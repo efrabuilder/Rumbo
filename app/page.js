@@ -293,10 +293,36 @@ export default function Home() {
       .join(", ");
   }, []);
 
+  // Convierte un resultado de Nominatim (que sí indexa calles y localidades
+  // muy chicas) al mismo formato que usan los resultados de Open-Meteo, para
+  // poder mostrarlos en la misma lista de sugerencias.
+  const normalizeNominatim = useCallback((r) => {
+    const addr = r.address || {};
+    const name =
+      addr.road || addr.neighbourhood || addr.suburb || addr.village ||
+      addr.hamlet || addr.town || addr.city || r.display_name.split(",")[0];
+    return {
+      id: r.place_id,
+      name,
+      admin1: addr.state || addr.region || "",
+      admin2: addr.county || "",
+      admin3: addr.municipality || addr.city_district || "",
+      admin4: [addr.village, addr.hamlet, addr.suburb, addr.neighbourhood].find((p) => p && p !== name) || "",
+      country: addr.country || "",
+      country_code: (addr.country_code || "").toUpperCase(),
+      latitude: parseFloat(r.lat),
+      longitude: parseFloat(r.lon),
+      timezone: "auto",
+    };
+  }, []);
+
   // Busca coincidencias de lugar y las muestra para que el usuario elija
   // el correcto (ej. "Atenas, Alajuela, Costa Rica" vs "Atenas, Grecia").
   // count=20 (en vez de 8) para que también aparezcan distritos y caseríos
   // pequeños, que suelen quedar detrás de las ciudades más pobladas.
+  // Open-Meteo solo tiene lugares poblados (GeoNames), así que si no
+  // encuentra nada -por ejemplo una calle, un barrio muy chico o un local-
+  // se prueba con Nominatim (OpenStreetMap), que sí indexa calles y barrios.
   const searchPlaces = useCallback(async (text) => {
     if (!text.trim()) return;
     setSearchError("");
@@ -306,17 +332,32 @@ export default function Home() {
         `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(text)}&count=20&language=es&format=json`
       );
       const geoData = await geoRes.json();
-      if (!geoData.results || geoData.results.length === 0) {
-        setSearchError("No encontramos esa ciudad. Probá con otro nombre o agregá el país (ej. \"Atenas, Costa Rica\").");
+      if (geoData.results?.length === 1) {
+        selectPlace(geoData.results[0]);
         return;
       }
-      if (geoData.results.length === 1) {
-        selectPlace(geoData.results[0]);
-      } else {
+      if (geoData.results?.length > 1) {
         setSuggestions(geoData.results);
+        return;
+      }
+
+      // Sin resultados en Open-Meteo: probamos con Nominatim (calles, barrios, etc.)
+      const nomRes = await fetch(
+        `https://nominatim.openstreetmap.org/search?format=jsonv2&q=${encodeURIComponent(text)}&accept-language=es&addressdetails=1&limit=8`
+      );
+      const nomData = await nomRes.json();
+      if (!Array.isArray(nomData) || nomData.length === 0) {
+        setSearchError("No encontramos ese lugar. Probá con otro nombre o agregá el país (ej. \"Zacatal, Costa Rica\").");
+        return;
+      }
+      const normalized = nomData.map(normalizeNominatim);
+      if (normalized.length === 1) {
+        selectPlace(normalized[0]);
+      } else {
+        setSuggestions(normalized);
       }
     } catch (e) {
-      setSearchError("No se pudo buscar la ciudad. Revisá tu conexión e intentá de nuevo.");
+      setSearchError("No se pudo buscar el lugar. Revisá tu conexión e intentá de nuevo.");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
