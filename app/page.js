@@ -280,15 +280,30 @@ export default function Home() {
     }
   }, [favorites]);
 
-  // Busca coincidencias de ciudad y las muestra para que el usuario elija
-  // la correcta (ej. "Atenas, Alajuela, Costa Rica" vs "Atenas, Grecia").
+  // Arma el texto que distingue un lugar de otro con el mismo nombre
+  // (ej. un caserío o distrito repetido en dos provincias, o en dos países).
+  // Usa los niveles administrativos que Open-Meteo trae para CUALQUIER país
+  // (admin2/admin3/admin4 = cantón/distrito/localidad en Costa Rica, pero
+  // aplica igual a departamento/municipio, etc. en otros países).
+  const placeBreadcrumb = useCallback((g) => {
+    const parts = [g.admin4, g.admin3, g.admin2, g.admin1, g.country];
+    const seen = new Set([g.name]);
+    return parts
+      .filter((p) => p && !seen.has(p) && seen.add(p))
+      .join(", ");
+  }, []);
+
+  // Busca coincidencias de lugar y las muestra para que el usuario elija
+  // el correcto (ej. "Atenas, Alajuela, Costa Rica" vs "Atenas, Grecia").
+  // count=20 (en vez de 8) para que también aparezcan distritos y caseríos
+  // pequeños, que suelen quedar detrás de las ciudades más pobladas.
   const searchPlaces = useCallback(async (text) => {
     if (!text.trim()) return;
     setSearchError("");
     setSuggestions([]);
     try {
       const geoRes = await fetch(
-        `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(text)}&count=8&language=es&format=json`
+        `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(text)}&count=20&language=es&format=json`
       );
       const geoData = await geoRes.json();
       if (!geoData.results || geoData.results.length === 0) {
@@ -322,6 +337,9 @@ export default function Home() {
     const dest = {
       name: g.name,
       admin1: g.admin1 || "",
+      admin2: g.admin2 || "",
+      admin3: g.admin3 || "",
+      admin4: g.admin4 || "",
       country: g.country,
       countryCode: g.country_code,
       lat: g.latitude,
@@ -352,7 +370,9 @@ export default function Home() {
       setUpdatedAt(new Date());
 
       setFavorites((prev) => {
-        const withoutDup = prev.filter((f) => !(f.name === resolvedDest.name && f.country === resolvedDest.country));
+        const withoutDup = prev.filter(
+          (f) => !(f.name === resolvedDest.name && f.country === resolvedDest.country && f.admin1 === resolvedDest.admin1)
+        );
         return [{ ...resolvedDest, temp: Math.round(wData?.current?.temperature_2m ?? 0) }, ...withoutDup].slice(0, 6);
       });
     } catch (e) {
@@ -381,6 +401,9 @@ export default function Home() {
       selectPlace({
         name,
         admin1: addr.state || addr.region || "",
+        admin2: addr.county || "",
+        admin3: addr.municipality || "",
+        admin4: addr.village || addr.hamlet || "",
         country: addr.country || "",
         country_code: (addr.country_code || "").toUpperCase(),
         latitude: lat,
@@ -466,7 +489,8 @@ export default function Home() {
 
   const goToFavorite = (f) =>
     selectPlace({
-      name: f.name, admin1: f.admin1, country: f.country, country_code: f.countryCode,
+      name: f.name, admin1: f.admin1, admin2: f.admin2, admin3: f.admin3, admin4: f.admin4,
+      country: f.country, country_code: f.countryCode,
       latitude: f.lat, longitude: f.lon, timezone: f.timezone,
     });
 
@@ -559,7 +583,7 @@ export default function Home() {
                 >
                   <span className="text-ink">{s.name}</span>
                   <span className="text-inkSoft text-xs truncate">
-                    {[s.admin1, s.country].filter(Boolean).join(", ")}
+                    {placeBreadcrumb(s)}
                   </span>
                 </button>
               ))}
@@ -596,7 +620,7 @@ export default function Home() {
                 <div className="flex items-start justify-between">
                   <div>
                     <p className="text-inkSoft text-sm">
-                      {[destination.admin1, destination.country].filter(Boolean).join(", ")}
+                      {placeBreadcrumb(destination)}
                     </p>
                     <h2 className="font-display text-2xl mt-0.5">{destination.name}</h2>
                   </div>
